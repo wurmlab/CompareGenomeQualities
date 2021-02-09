@@ -1,0 +1,131 @@
+---
+title: "Assembly comparison"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+library(tidyr)
+library(scales)
+library(ggpubr)
+library(ggplot2)
+
+# Based on:
+# https://www.r-bloggers.com/merging-multiple-data-files-into-one-data-frame/
+readData <- function() {
+  files = list.files(pattern = '*.tsv', full.names = TRUE)
+  datalist = lapply(files, function(file) {
+    read.table(file, sep = "\t", header = TRUE)
+  })
+  Reduce(function(x,y) { merge(x, y, by = 'ID') }, datalist)
+}
+
+# NOTE: Customise as appropriate.
+labels <- function(x) {
+  lapply(x, function(y) {
+    if (!is.na(y) && y >= 1000000) {
+      paste0(round(y / 1000000), ' Mb')
+    }
+    else if (!is.na(y) && y > 1000) {
+      paste0(round(y / 1000), ' Kb')
+    }
+    #else if (!is.na(y) && y < 100) {
+      #paste0(y, '%')
+    #}
+    else {
+      y
+    }
+  })
+}
+
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, info = FALSE, fig.path = 'figs/')
+```
+
+## Correlation between metrics
+```{r corr}
+# Read TSV data files as a single data frame.
+data <- readData()
+
+variables <- tail(colnames(data), -1)
+cor_pairs <- combn(variables, 2)
+
+plotList <- lapply(1:ncol(cor_pairs), function(i) {
+  pair = cor_pairs[,i]
+  x = data[,pair[1]]
+  y = data[,pair[2]]
+  ggplot(data, aes(x = x, y = y)) +
+    scale_x_continuous(name = pair[1], labels = labels) +
+    scale_y_continuous(name = pair[2], labels = labels) +
+    geom_point() +
+    stat_cor(aes(label = ..r.label..), method = 'spearman', cor.coef.name = 'rho') +
+    theme_bw()
+})
+
+ggarrange(plotlist = plotList, nrow = 2, ncol = 3)
+```
+
+## Weighted assembly rank
+
+```{r rank}
+# Read TSV data files as a single data frame.
+data <- readData()
+
+# The variables to determine weights for.
+variables <- tail(colnames(data), -1)
+
+# Determine weight for each metric.
+weights <- list()
+for (variable in variables) {
+  avg_cor <- 0
+  remaining <- setdiff(variables, c(variable))
+  for (other in remaining) {
+    ccor <- cor(data[variable], data[other], method = 'spearman')
+    avg_cor <- avg_cor + abs(ccor)
+  }
+  avg_cor <- avg_cor / length(remaining)
+  weights[[variable]] <- 1 - avg_cor
+  if (weights[[variable]] == 0) {
+    weights[[variable]] <- 1
+  }
+}
+
+# Rank the assemblies.
+ranks <- list()
+for (variable in variables) {
+  ranks[[variable]] <- rank(data[variable], ties.method = 'min')
+}
+
+# Determine cummulative rank.
+cumm_rank = c()
+for (i in 1:nrow(data)) {
+  cumm_rank[i] <- 0
+  for (variable in variables) {
+    cumm_rank[i] <- cumm_rank[i] + ranks[[variable]][i] * weights[[variable]]
+  }
+}
+# And add the ranks to the data frame.
+data$Rank <- cumm_rank
+
+# Collect name of all metrics, including Rank, that we want to visualise.
+variables <- tail(colnames(data), -1)
+
+# Make a copy of rank column in the data frame. This is required for ordering
+# the points by rank in the call to ggplot. We run into an error if we try to
+# sort by Rank instead of rank_.
+data$rank_ <- data$Rank
+
+# Transform data to long format for easy faceting.
+data_long <- gather_(data, 'variable', 'value', variables, factor_key = TRUE)
+
+ggplot(data_long, aes(x = reorder(ID, rank_), y = value)) +
+  facet_grid(. ~ variable, scales = 'free') +
+  coord_flip() +
+  geom_point() +
+  scale_x_discrete(name = NULL) +
+  scale_y_continuous(name = NULL, labels = labels) +
+  theme_bw() +
+  theme(strip.text = element_text(size = 11),
+        axis.text.x = element_text(angle = 90, hjust = .5, vjust = .5))
+```
